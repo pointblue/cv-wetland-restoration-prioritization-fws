@@ -17,7 +17,7 @@ check_env_vars <- function(env_vars = c("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_
     if (raise_error == TRUE) {
       stop(msg)
     } else {
-      warning(msg)
+      message(msg)
     }
     
   }
@@ -46,7 +46,7 @@ check_buckets <- function(buckets, raise_error = FALSE, ...) {
     if (raise_error == TRUE) {
       stop(msg)
     } else {
-      warning(msg)
+      message(msg)
     }
       
   } 
@@ -83,7 +83,7 @@ check_objects <- function(objects, bucket, raise_error = FALSE, ...) {
     if (raise_error == TRUE) {
       stop(msg)
     } else {
-      warning(msg)
+      message(msg)
     }
     
   }
@@ -97,7 +97,7 @@ check_objects <- function(objects, bucket, raise_error = FALSE, ...) {
 # Vectorized version of function to save objects from an Amazon S3 bucket
 save_objects <- function(objects, bucket, local_dirs, raise_error = FALSE, skip_missing = FALSE, overwrite = FALSE, ...) {
   
-  # Check inputs (package, bucket, and objects checked in check_objects)
+  # Check inputs (bucket and objects checked in check_objects)
   if (!require(aws.s3)) stop("The package aws.s3 is required but missing")
   if (!is.character(local_dirs)) stop("Argument 'local_dirs' must be a character vector")
   if (length(local_dirs) != 1 & length(local_dirs) != length(objects)) stop("Argument 'local_dirs' must be either of length 1 or of equal length to 'objects'")
@@ -134,56 +134,63 @@ save_objects <- function(objects, bucket, local_dirs, raise_error = FALSE, skip_
   }
   
   # Check local file existence
-  files_exist <- file.exists(file.path(local_dirs, objects))
+  files <- file.path(local_dirs, objects)
+  files_exist <- file.exists(files)
   if (any(files_exist)) {
     
     if (overwrite == TRUE) {
       message("The follwoing file(s) already exist and will be overwritten (overwrite == TRUE): ", 
-              paste0(objects[files_exist], collapse = ", "))
+              paste0(files[files_exist], collapse = ", "))
     } else {
       
       message("Skipping the following file(s) because they already exist and overwrite != TRUE: ", 
-              paste0(objects[files_exist], collapse = ", "))
+              paste0(files[files_exist], collapse = ", "))
       
     }
     
   }
   
   # Download only if object exists and either the local file doesn't exist or overwrite == TRUE
-  download_objects <- objects_exist & (!files_exist | overwrite)
-  print(download_objects)
+  transfer <- objects_exist & (!files_exist | overwrite)
+  #print(transfer_objects)
   
-  save_status <- mapply(obj = objects, dir = local_dirs, dwn = download_objects, SIMPLIFY = FALSE, FUN = function(obj, dir, dwn, ...) {
+  # Download
+  status <- mapply(obj = objects, dir = local_dirs, trn = transfer, SIMPLIFY = FALSE, FUN = function(obj, dir, trn, ...) {
     
-    if (dwn) {
+    if (trn) {
+      
       try({
+        
         file <- file.path(dir, obj)
         #message(paste0("Downloading ", obj, " to ", dir))
         save_object(obj, bucket, file = file)
         message(paste0(obj, " saved to ", dir))
         return(file)
+        
       }, silent = TRUE)
+      
     } else {
       return(FALSE)
     }
       
   })
   
-  errors <- unlist(lapply(save_status, FUN = is.try_error))
+  # Check for errors
+  errors <- unlist(lapply(status, FUN = is.try_error))
   if (any(errors)) {
     
     warning("Could not save the following files: ", paste0(objects[errors], collapse = ", "))
     
     if (raise_error == TRUE) {
-      stop(save_status[errors])
+      stop(status[errors])
     } else {
-      warning(save_status[errors])
+      warning(status[errors])
     }
     
   }
   
-  names(save_status) <- objects
-  return(save_status)
+  names(status) <- objects
+  return(status)
  
 }
 
@@ -191,111 +198,112 @@ save_objects <- function(objects, bucket, local_dirs, raise_error = FALSE, skip_
 
 
 # Vectorized version of function to put objects in an Amazon S3 bucket
+# If giving single object, will append basename(files) to object name
 put_objects <- function(files, objects, bucket, raise_error = FALSE, skip_missing = FALSE, overwrite = FALSE, ...) {
   
-  # Check inputs (package, bucket, and objects checked in check_objects)
+  # Check inputs
   if (!require(aws.s3)) stop("The package aws.s3 is required but missing")
   if (!is.character(files)) stop("Argument 'files' must be a character vector")
+  
+  if (!is.character(objects)) stop("Argument 'objects' must be a character vector")
   if (length(objects) != 1 & length(objects) != length(files)) stop("Argument 'objects' must be either of length 1 or of equal length to 'files'")
-  if (length(objects) == 1) objects <- rep(objects, length(objects))
   
   if (!is.logical(skip_missing)) stop("Argument 'skip_missing' must be logical")
   if (!is.logical(overwrite)) stop("Argument 'overwrite' must be logical")
   
+  # If only one object name given with multiple files, treat it as a prefix (folder) and append basename(files)
+  if (length(objects) == 1 & length(files) > 1) objects <- file.path(objects, basename(files))
+  
+  # Then check for duplication in nam
+  if (any(duplicated(objects))) stop("Object names must be unique (if specifying a single object, basename(files) must be unique). Duplicate names ",
+                                     paste0(objects[duplicated(objects)], collapse = ", "))
+  
+  # Check bucket existence
+  if (!bucket_exists(bucket)) stop("Specified 'bucket' ", bucket, " not found.")
+  
   # Check file existence
   files_exist <- file.exists(files)
   if (!all(files_exist)) {
+    
     msg <- paste0("Missing the following local file(s) specified in files: ", paste0(files[!paths_exist],  collapse = ", "))
+    
     if (skip_missing != TRUE) {
+      
       if (raise_error == TRUE) {
         stop(msg)
       } else {
         warning(msg)
         return(rep(FALSE, length(files)))
       }
+      
     } else {
-      warning(msg, ".\n Will attempt to upload non-missing files")
+      warning(msg, ".\n Will attempt to upload non-missing files.")
     }
+    
   }
   
-  # Check bucket existence
-  if (!bucket_exists(bucket)) stop("Specified 'bucket' ", bucket, " not found.")
-  
-  # Check objects exist in bucket
+  # Check object existence
   obj_status <- check_objects(objects, bucket, raise_error = raise_error, ...)
   objects_exist <- unlist(extract_subelement(obj_status, 1))
-  
-  if (!all(objects_exist)) {
-    
-    if (skip_missing == TRUE) {
-      
-      if (sum(objects_exist) == 0) {
-        warning("None of the specified files exist.")
-        return(rep(FALSE, length(objects)))
-      } else {
-        warning("Will skip missing objects and download others in list.")
-      }
-      
-    } else {
-      
-      warning("Will skip all objects because some were missing.")
-      return(rep(FALSE, length(objects)))
-      
-    }
-    
-  }
-  
-  # Check local file existence
-  files_exist <- file.exists(file.path(local_dirs, objects))
-  if (any(files_exist)) {
+  if (any(objects_exist)) {
     
     if (overwrite == TRUE) {
-      message("The follwoing file(s) already exist and will be overwritten (overwrite == TRUE): ", 
-              paste0(objects[files_exist], collapse = ", "))
+      message("The following object(s) already exist and will be overwritten (overwrite == TRUE): ", 
+              paste0(objects[objects_exist], collapse = ", "))
     } else {
       
       message("Skipping the following file(s) because they already exist and overwrite != TRUE: ", 
-              paste0(objects[files_exist], collapse = ", "))
+              paste0(objects[objects_exist], collapse = ", "))
       
     }
     
   }
   
   # Download only if object exists and either the local file doesn't exist or overwrite == TRUE
-  download_objects <- objects_exist & (!files_exist | overwrite)
-  print(download_objects)
+  transfer <- files_exist & (!objects_exist | overwrite)
+  #print(transfer_objects)
   
-  save_status <- mapply(obj = objects, dir = local_dirs, dwn = download_objects, SIMPLIFY = FALSE, FUN = function(obj, dir, dwn, ...) {
+  # Upload, wrapped with try to allow partial success
+  status <- mapply(file = files, obj = objects, trn = transfer, SIMPLIFY = FALSE, FUN = function(file, obj, trn, ...) {
     
-    if (dwn) {
+    if (trn) {
+      
       try({
-        file <- file.path(dir, obj)
-        #message(paste0("Downloading ", obj, " to ", dir))
-        save_object(obj, bucket, file = file)
-        message(paste0(obj, " saved to ", dir))
-        return(file)
+        
+        #message(paste0("Uploading ", file, " to ", bucket))
+        put_object(file, obj, bucket)
+        message(paste0(file, " uploaded to ", bucket, " as ", obj))
+        return(obj)
+        
       }, silent = TRUE)
+      
     } else {
       return(FALSE)
     }
     
   })
   
-  errors <- unlist(lapply(save_status, FUN = is.try_error))
+  # Check for errors
+  errors <- unlist(lapply(status, FUN = is.try_error))
   if (any(errors)) {
     
-    warning("Could not save the following files: ", paste0(objects[errors], collapse = ", "))
+    warning("Could not upload the following files: ", paste0(files[errors], collapse = ", "))
     
     if (raise_error == TRUE) {
-      stop(save_status[errors])
+      stop(status[errors])
     } else {
-      warning(save_status[errors])
+      warning(status[errors])
     }
     
   }
   
-  names(save_status) <- objects
-  return(save_status)
+  names(status) <- files
+  return(status)
   
 }
 
+#test_file <- file.path(getwd(), "test.txt")
+#test_obj <- "test_upload.txt"
+#test_bkt <- "pfss-test-bucket"
+#put_object(test_file, test_obj, test_bkt)
+#foo <- put_objects(test_file, test_obj, test_bkt, overwrite = TRUE)
